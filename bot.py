@@ -213,10 +213,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(msg, reply_markup=get_keyboard(), parse_mode="Markdown")
 
-    else:
-        await update.message.reply_text("দয়া করে নিচের বাটন ব্যবহার করো।", reply_markup=get_keyboard())
+        else:
+        await update.message.reply_text(
+            "দয়া করে নিচের বাটন ব্যবহার করো।",
+            reply_markup=get_keyboard()
+        )
 
- def main():
+def main():
     load_data()
 
     if not TOKEN:
@@ -229,6 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print("বট চালু হয়েছে...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
