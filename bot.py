@@ -218,9 +218,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     load_data()
+
+    if not TOKEN:
+        raise ValueError("TOKEN environment variable is missing!")
+
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
+
     print("বট চালু হয়েছে...")
     app.run_polling()
 
