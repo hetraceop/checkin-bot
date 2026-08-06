@@ -11,8 +11,9 @@ user_data = {}
 
 BD_TZ = pytz.timezone("Asia/Dhaka")
 
-WORK_START_HOUR = 17
-WORK_END_HOUR = 5
+# ===== সেটিংস =====
+WORK_START_HOUR = 17   # বিকাল ৫টা
+WORK_END_HOUR = 5      # সকাল ৫টা
 EAT_LIMIT = 2
 EAT_MINUTES = 40
 TOILET_LIMIT = 4
@@ -48,37 +49,30 @@ def get_user(user_id):
     today = now_bd().strftime("%Y-%m-%d")
 
     if user_id not in user_data:
-        user_data[user_id] = {
-            "status": "off",
-            "start_time": None,
-            "activity_start": None,
-            "date": today,
-            "eat_count": 0,
-            "toilet_count": 0,
-            "smoke_count": 0,
-            "eat_minutes": 0,
-            "toilet_minutes": 0,
-            "smoke_minutes": 0,
-            "logs": []
-        }
-
-    # নতুন দিন হলে সব রিসেট
+        user_data[user_id] = make_new_user(today)
+    
+    # নতুন দিন হলে রিসেট
     if user_data[user_id].get("date") != today:
-        user_data[user_id] = {
-            "status": "off",
-            "start_time": None,
-            "activity_start": None,
-            "date": today,
-            "eat_count": 0,
-            "toilet_count": 0,
-            "smoke_count": 0,
-            "eat_minutes": 0,
-            "toilet_minutes": 0,
-            "smoke_minutes": 0,
-            "logs": []
-        }
+        user_data[user_id] = make_new_user(today)
 
     return user_data[user_id]
+
+
+def make_new_user(today):
+    return {
+        "status": "off",
+        "start_time": None,
+        "activity_start": None,
+        "activity_type": None,
+        "date": today,
+        "eat_count": 0,
+        "toilet_count": 0,
+        "smoke_count": 0,
+        "eat_minutes": 0.0,
+        "toilet_minutes": 0.0,
+        "smoke_minutes": 0.0,
+        "logs": []
+    }
 
 
 def get_keyboard():
@@ -98,44 +92,31 @@ def is_work_time():
     return WORK_START_HOUR <= hour < WORK_END_HOUR
 
 
-def calculate_minutes(start_str):
-    """শুরুর সময় থেকে এখন পর্যন্ত কত মিনিট হিসাব করে"""
+def get_elapsed_minutes(start_str):
+    """শুরুর সময় থেকে এখন পর্যন্ত কত মিনিট"""
+    if not start_str:
+        return 0.0
     try:
         start = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
         start = BD_TZ.localize(start)
-        elapsed = (now_bd() - start).total_seconds() / 60
-        return round(elapsed, 1)
-    except:
-        return 0
+        seconds = (now_bd() - start).total_seconds()
+        return round(max(0, seconds) / 60, 1)
+    except Exception as e:
+        print("Time calculate error:", e)
+        return 0.0
 
 
-def check_timeout(user):
-    if not user.get("activity_start") or user["status"] in ["working", "off"]:
-        return None
-
-    elapsed = calculate_minutes(user["activity_start"])
-
-    if user["status"] == "eating" and elapsed > EAT_MINUTES:
-        return f"⚠️ খাওয়ার সময়সীমা ({EAT_MINUTES} মিনিট) শেষ! আসনে ফিরে আসুন।"
-    if user["status"] == "toilet" and elapsed > TOILET_MINUTES:
-        return f"⚠️ টয়লেটের সময়সীমা ({TOILET_MINUTES} মিনিট) শেষ! আসনে ফিরে আসুন।"
-    if user["status"] == "smoking" and elapsed > SMOKE_MINUTES:
-        return f"⚠️ সিগারেটের সময়সীমা ({SMOKE_MINUTES} মিনিট) শেষ! আসনে ফিরে আসুন।"
-    return None
-
-
-def format_time(minutes):
-    """মিনিটকে ঘণ্টা:মিনিট ফরম্যাটে দেখায়"""
-    if minutes < 60:
-        return f"{minutes} মিনিট"
-    hours = int(minutes // 60)
-    mins = int(minutes % 60)
-    return f"{hours} ঘণ্টা {mins} মিনিট"
+def format_min(m):
+    if m < 60:
+        return f"{m} মিনিট"
+    h = int(m // 60)
+    mins = int(m % 60)
+    return f"{h} ঘণ্টা {mins} মিনিট"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 স্বাগতম!\nআমি তোমার অ্যাটেন্ডেন্স বট।\nনিচের বাটন ব্যবহার করো।",
+        "👋 স্বাগতম!\nআমি তোমার অ্যাটেন্ডেন্স বট।\nনিচের বাটনগুলো ব্যবহার করো।",
         reply_markup=get_keyboard()
     )
 
@@ -144,154 +125,169 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    text = update.message.text
+    text = update.message.text.strip()
     user = get_user(update.effective_user.id)
     now = now_bd().strftime("%Y-%m-%d %H:%M:%S")
-
-    # টাইমআউট সতর্কতা
-    warning = check_timeout(user)
-    if warning and text not in ["🔙 আসনে ফিরে আসা", "🏁 কাজ শেষ"]:
-        await update.message.reply_text(warning, reply_markup=get_keyboard())
 
     # ===== কাজ শুরু =====
     if text == "✅ কাজ শুরু":
         if not is_work_time():
-            await update.message.reply_text("❌ এখন কাজের সময় নয়।\nসময়: বিকাল ৫টা – সকাল ৫টা", reply_markup=get_keyboard())
+            await update.message.reply_text(
+                "⚠️ এখন কাজের সময় নয়!\nকাজের সময়: বিকাল ৫টা থেকে সকাল ৫টা পর্যন্ত।",
+                reply_markup=get_keyboard()
+            )
             return
-        if user["status"] == "working":
+
+        if user["status"] != "off":
             await update.message.reply_text("ℹ️ তুমি ইতিমধ্যে কাজ শুরু করেছো।", reply_markup=get_keyboard())
             return
 
         user["status"] = "working"
         user["start_time"] = now
         user["activity_start"] = None
+        user["activity_type"] = None
         user["logs"].append(f"{now} - কাজ শুরু")
         save_data()
         await update.message.reply_text(f"✅ কাজ শুরু হয়েছে!\n🕐 {now}", reply_markup=get_keyboard())
+        return
 
     # ===== আসনে ফিরে আসা =====
-    elif text == "🔙 আসনে ফিরে আসা":
+    if text == "🔙 আসনে ফিরে আসা":
+        if user["status"] == "off":
+            await update.message.reply_text("❌ তুমি এখনো কাজ শুরু করোনি।", reply_markup=get_keyboard())
+            return
+
         if user["status"] in ["eating", "toilet", "smoking"] and user.get("activity_start"):
-            minutes = calculate_minutes(user["activity_start"])
+            minutes = get_elapsed_minutes(user["activity_start"])
 
             if user["status"] == "eating":
                 user["eat_minutes"] += minutes
-                msg = f"✅ আসনে ফিরে এসেছো।\n🍚 খাওয়ায় সময় দিয়েছ: *{format_time(minutes)}*\n🕐 {now}"
+                activity_name = "🍚 খাওয়া"
             elif user["status"] == "toilet":
                 user["toilet_minutes"] += minutes
-                msg = f"✅ আসনে ফিরে এসেছো।\n🚽 টয়লেটে সময় দিয়েছ: *{format_time(minutes)}*\n🕐 {now}"
-            elif user["status"] == "smoking":
+                activity_name = "🚽 টয়লেট"
+            else:
                 user["smoke_minutes"] += minutes
-                msg = f"✅ আসনে ফিরে এসেছো।\n🚬 সিগারেটে সময় দিয়েছ: *{format_time(minutes)}*\n🕐 {now}"
+                activity_name = "🚬 সিগারেট"
 
-            user["logs"].append(f"{now} - আসনে ফিরে এসেছে ({minutes} মিনিট)")
+            user["logs"].append(f"{now} - {activity_name} শেষ ({minutes} মিনিট)")
+
+            msg = (
+                f"✅ আসনে ফিরে এসেছো।\n\n"
+                f"{activity_name}য় সময় দিয়েছ: *{format_min(minutes)}*\n\n"
+                f"📊 আজকের মোট:\n"
+                f"🍚 খাওয়া: {user['eat_count']} বার | {format_min(user['eat_minutes'])}\n"
+                f"🚽 টয়লেট: {user['toilet_count']} বার | {format_min(user['toilet_minutes'])}\n"
+                f"🚬 সিগারেট: {user['smoke_count']} বার | {format_min(user['smoke_minutes'])}"
+            )
         else:
             msg = f"✅ আসনে ফিরে এসেছো।\n🕐 {now}"
 
         user["status"] = "working"
         user["activity_start"] = None
+        user["activity_type"] = None
         save_data()
         await update.message.reply_text(msg, reply_markup=get_keyboard(), parse_mode="Markdown")
+        return
 
-    # ===== খাওয়া =====
-    elif text == "🍚 খাওয়া":
+    # ===== খাওয়া / টয়লেট / সিগারেট =====
+    if text in ["🍚 খাওয়া", "🚽 টয়লেট", "🚬 সিগারেট"]:
         if user["status"] == "off":
-            await update.message.reply_text("❌ আগে কাজ শুরু করো।", reply_markup=get_keyboard())
-            return
-        if user["eat_count"] >= EAT_LIMIT:
-            await update.message.reply_text(f"❌ আজকের খাওয়ার সীমা শেষ! ({EAT_LIMIT} বার)", reply_markup=get_keyboard())
+            await update.message.reply_text("❌ আগে **কাজ শুরু** করো।", reply_markup=get_keyboard(), parse_mode="Markdown")
             return
 
-        user["status"] = "eating"
+        if user["status"] in ["eating", "toilet", "smoking"]:
+            await update.message.reply_text("⚠️ আগে আসনে ফিরে আসো, তারপর নতুন বিরতি নাও।", reply_markup=get_keyboard())
+            return
+
+        if text == "🍚 খাওয়া":
+            if user["eat_count"] >= EAT_LIMIT:
+                await update.message.reply_text(f"❌ আজকের খাওয়ার সীমা শেষ! (সর্বোচ্চ {EAT_LIMIT} বার)", reply_markup=get_keyboard())
+                return
+            user["status"] = "eating"
+            user["eat_count"] += 1
+            limit = EAT_MINUTES
+            name = "খাওয়া"
+
+        elif text == "🚽 টয়লেট":
+            if user["toilet_count"] >= TOILET_LIMIT:
+                await update.message.reply_text(f"❌ আজকের টয়লেট সীমা শেষ! (সর্বোচ্চ {TOILET_LIMIT} বার)", reply_markup=get_keyboard())
+                return
+            user["status"] = "toilet"
+            user["toilet_count"] += 1
+            limit = TOILET_MINUTES
+            name = "টয়লেট"
+
+        else:  # সিগারেট
+            if user["smoke_count"] >= SMOKE_LIMIT:
+                await update.message.reply_text(f"❌ আজকের সিগারেট সীমা শেষ! (সর্বোচ্চ {SMOKE_LIMIT} বার)", reply_markup=get_keyboard())
+                return
+            user["status"] = "smoking"
+            user["smoke_count"] += 1
+            limit = SMOKE_MINUTES
+            name = "সিগারেট"
+
         user["activity_start"] = now
-        user["eat_count"] += 1
-        user["logs"].append(f"{now} - খাওয়া শুরু ({user['eat_count']}/{EAT_LIMIT})")
+        user["activity_type"] = user["status"]
+        user["logs"].append(f"{now} - {name} শুরু")
         save_data()
+
         await update.message.reply_text(
-            f"🍚 খাওয়া শুরু হয়েছে\n⏱️ সময়সীমা: {EAT_MINUTES} মিনিট\n📊 আজ: {user['eat_count']}/{EAT_LIMIT} বার\n🕐 {now}",
+            f"{text} শুরু হয়েছে\n"
+            f"⏱️ সময়সীমা: {limit} মিনিট\n"
+            f"🕐 {now}\n\n"
+            f"সময় শেষ হলে বা আগে ফিরে এসে **আসনে ফিরে আসা** চাপো।",
             reply_markup=get_keyboard()
         )
-
-    # ===== টয়লেট =====
-    elif text == "🚽 টয়লেট":
-        if user["status"] == "off":
-            await update.message.reply_text("❌ আগে কাজ শুরু করো।", reply_markup=get_keyboard())
-            return
-        if user["toilet_count"] >= TOILET_LIMIT:
-            await update.message.reply_text(f"❌ আজকের টয়লেট সীমা শেষ! ({TOILET_LIMIT} বার)", reply_markup=get_keyboard())
-            return
-
-        user["status"] = "toilet"
-        user["activity_start"] = now
-        user["toilet_count"] += 1
-        user["logs"].append(f"{now} - টয়লেট ({user['toilet_count']}/{TOILET_LIMIT})")
-        save_data()
-        await update.message.reply_text(
-            f"🚽 টয়লেট\n⏱️ সময়সীমা: {TOILET_MINUTES} মিনিট\n📊 আজ: {user['toilet_count']}/{TOILET_LIMIT} বার\n🕐 {now}",
-            reply_markup=get_keyboard()
-        )
-
-    # ===== সিগারেট =====
-    elif text == "🚬 সিগারেট":
-        if user["status"] == "off":
-            await update.message.reply_text("❌ আগে কাজ শুরু করো।", reply_markup=get_keyboard())
-            return
-        if user["smoke_count"] >= SMOKE_LIMIT:
-            await update.message.reply_text(f"❌ আজকের সিগারেট সীমা শেষ! ({SMOKE_LIMIT} বার)", reply_markup=get_keyboard())
-            return
-
-        user["status"] = "smoking"
-        user["activity_start"] = now
-        user["smoke_count"] += 1
-        user["logs"].append(f"{now} - সিগারেট ({user['smoke_count']}/{SMOKE_LIMIT})")
-        save_data()
-        await update.message.reply_text(
-            f"🚬 সিগারেট বিরতি\n⏱️ সময়সীমা: {SMOKE_MINUTES} মিনিট\n📊 আজ: {user['smoke_count']}/{SMOKE_LIMIT} বার\n🕐 {now}",
-            reply_markup=get_keyboard()
-        )
+        return
 
     # ===== কাজ শেষ =====
-    elif text == "🏁 কাজ শেষ":
-        # যদি কোনো অ্যাক্টিভিটি চলতে থাকে তাহলে সেটার সময়ও যোগ করে নেয়
+    if text == "🏁 কাজ শেষ":
+        if user["status"] == "off":
+            await update.message.reply_text("❌ তুমি এখনো কাজ শুরু করোনি।", reply_markup=get_keyboard())
+            return
+
+        # যদি কোনো বিরতি চলতে থাকে তাহলে সেটার সময় যোগ করে নেয়
         if user["status"] in ["eating", "toilet", "smoking"] and user.get("activity_start"):
-            minutes = calculate_minutes(user["activity_start"])
+            minutes = get_elapsed_minutes(user["activity_start"])
             if user["status"] == "eating":
                 user["eat_minutes"] += minutes
             elif user["status"] == "toilet":
                 user["toilet_minutes"] += minutes
-            elif user["status"] == "smoking":
+            else:
                 user["smoke_minutes"] += minutes
 
-        # মোট কাজের সময় হিসাব
-        total_work_minutes = 0
+        total_work = 0.0
         if user.get("start_time"):
-            total_work_minutes = calculate_minutes(user["start_time"])
+            total_work = get_elapsed_minutes(user["start_time"])
 
         total_break = user["eat_minutes"] + user["toilet_minutes"] + user["smoke_minutes"]
-        net_work = max(0, total_work_minutes - total_break)
+        net_work = max(0.0, total_work - total_break)
 
         summary = (
             f"🏁 *কাজ শেষ হয়েছে!*\n\n"
-            f"🕐 কাজ শুরু: `{user.get('start_time') or 'N/A'}`\n"
-            f"🕐 কাজ শেষ: `{now}`\n\n"
-            f"⏱ *মোট সময়:* {format_time(total_work_minutes)}\n"
-            f"✅ *নিট কাজ:* {format_time(net_work)}\n"
-            f"⏸ *মোট বিরতি:* {format_time(total_break)}\n\n"
-            f"🍚 খাওয়া: {user['eat_count']} বার | {format_time(user['eat_minutes'])}\n"
-            f"🚽 টয়লেট: {user['toilet_count']} বার | {format_time(user['toilet_minutes'])}\n"
-            f"🚬 সিগারেট: {user['smoke_count']} বার | {format_time(user['smoke_minutes'])}\n\n"
+            f"🕐 শুরু: `{user.get('start_time')}`\n"
+            f"🕐 শেষ: `{now}`\n\n"
+            f"⏱ মোট সময়: *{format_min(total_work)}*\n"
+            f"✅ নিট কাজ: *{format_min(net_work)}*\n"
+            f"⏸ মোট বিরতি: *{format_min(total_break)}*\n\n"
+            f"🍚 খাওয়া: {user['eat_count']} বার → {format_min(user['eat_minutes'])}\n"
+            f"🚽 টয়লেট: {user['toilet_count']} বার → {format_min(user['toilet_minutes'])}\n"
+            f"🚬 সিগারেট: {user['smoke_count']} বার → {format_min(user['smoke_minutes'])}\n\n"
             f"শুভ রাত্রি! 🌙"
         )
 
         user["status"] = "off"
         user["activity_start"] = None
+        user["activity_type"] = None
         user["logs"].append(f"{now} - কাজ শেষ")
         save_data()
 
         await update.message.reply_text(summary, reply_markup=get_keyboard(), parse_mode="Markdown")
+        return
 
     # ===== স্ট্যাটাস =====
-    elif text == "📊 স্ট্যাটাস":
+    if text == "📊 স্ট্যাটাস":
         status_map = {
             "working": "🟢 কাজ করছে",
             "eating": "🍚 খাচ্ছে",
@@ -300,26 +296,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "off": "🔴 অফ"
         }
 
-        current_activity = ""
+        current = ""
         if user["status"] in ["eating", "toilet", "smoking"] and user.get("activity_start"):
-            mins = calculate_minutes(user["activity_start"])
-            current_activity = f"\n⏱️ চলমান: {format_time(mins)}"
+            mins = get_elapsed_minutes(user["activity_start"])
+            current = f"\n⏱️ এখন চলছে: {format_min(mins)}"
 
         total_break = user["eat_minutes"] + user["toilet_minutes"] + user["smoke_minutes"]
 
         msg = (
-            f"📊 *বর্তমান স্ট্যাটাস*\n\n"
-            f"অবস্থা: {status_map.get(user['status'])}{current_activity}\n"
-            f"কাজ শুরু: {user.get('start_time') or 'এখনো শুরু হয়নি'}\n\n"
-            f"🍚 খাওয়া: {user['eat_count']}/{EAT_LIMIT} বার | {format_time(user['eat_minutes'])}\n"
-            f"🚽 টয়লেট: {user['toilet_count']}/{TOILET_LIMIT} বার | {format_time(user['toilet_minutes'])}\n"
-            f"🚬 সিগারেট: {user['smoke_count']}/{SMOKE_LIMIT} বার | {format_time(user['smoke_minutes'])}\n\n"
-            f"⏸ মোট বিরতি: {format_time(total_break)}"
+            f"📊 *তোমার স্ট্যাটাস*\n\n"
+            f"অবস্থা: {status_map.get(user['status'])}{current}\n"
+            f"কাজ শুরু: {user.get('start_time') or 'এখনো হয়নি'}\n\n"
+            f"🍚 খাওয়া: {user['eat_count']} বার | {format_min(user['eat_minutes'])}\n"
+            f"🚽 টয়লেট: {user['toilet_count']} বার | {format_min(user['toilet_minutes'])}\n"
+            f"🚬 সিগারেট: {user['smoke_count']} বার | {format_min(user['smoke_minutes'])}\n\n"
+            f"⏸ মোট বিরতি: {format_min(total_break)}"
         )
         await update.message.reply_text(msg, reply_markup=get_keyboard(), parse_mode="Markdown")
+        return
 
-    else:
-        await update.message.reply_text("দয়া করে নিচের বাটন ব্যবহার করো।", reply_markup=get_keyboard())
+    # অন্য কিছু চাপলে
+    await update.message.reply_text("দয়া করে নিচের বাটনগুলো ব্যবহার করো।", reply_markup=get_keyboard())
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -334,7 +331,7 @@ def main():
     load_data()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
     print("বট চালু হয়েছে...")
     app.run_polling(drop_pending_updates=True)
