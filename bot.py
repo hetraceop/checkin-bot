@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 import os
 
-TOKEN = os.getenv("8913069353:AAGUFkwYClgEOXZPc6VDgaX3YK4UTZLGVTU")
+TOKEN = os.getenv("TOKEN")
 
 DATA_FILE = "checkin_data.json"
 user_data = {}
