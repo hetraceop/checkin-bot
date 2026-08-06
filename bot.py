@@ -3,14 +3,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from datetime import datetime, timedelta
 import json
 import os
-import pytz
 
 TOKEN = os.getenv("TOKEN")
 DATA_FILE = "checkin_data.json"
 user_data = {}
-
-# বাংলাদেশ সময়
-BD_TZ = pytz.timezone("Asia/Dhaka")
 
 # ===== সেটিংস =====
 WORK_START_HOUR = 17   # বিকাল ৫টা
@@ -21,9 +17,6 @@ TOILET_LIMIT = 4
 TOILET_MINUTES = 15
 SMOKE_LIMIT = 6
 SMOKE_MINUTES = 10
-
-def now_bd():
-    return datetime.now(BD_TZ)
 
 def load_data():
     global user_data
@@ -37,7 +30,7 @@ def save_data():
 
 def get_user(user_id):
     user_id = str(user_id)
-    today = now_bd().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     
     if user_id not in user_data:
         user_data[user_id] = {
@@ -51,17 +44,13 @@ def get_user(user_id):
             "logs": []
         }
     
+    # নতুন দিন হলে কাউন্টার রিসেট
     if user_data[user_id].get("date") != today:
-        user_data[user_id].update({
-            "date": today,
-            "eat_count": 0,
-            "toilet_count": 0,
-            "smoke_count": 0,
-            "logs": [],
-            "start_time": None,
-            "activity_start": None,
-            "status": "off"
-        })
+        user_data[user_id]["date"] = today
+        user_data[user_id]["eat_count"] = 0
+        user_data[user_id]["toilet_count"] = 0
+        user_data[user_id]["smoke_count"] = 0
+        user_data[user_id]["logs"] = []
     
     return user_data[user_id]
 
@@ -72,33 +61,51 @@ def get_keyboard():
         [KeyboardButton("🚬 সিগারেট"), KeyboardButton("🏁 কাজ শেষ")],
         [KeyboardButton("📊 স্ট্যাটাস")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def is_work_time():
-    hour = now_bd().hour
-    return hour >= WORK_START_HOUR or hour < WORK_END_HOUR
+    now = datetime.now()
+    hour = now.hour
+    if WORK_START_HOUR > WORK_END_HOUR:  # রাতের শিফট
+        return hour >= WORK_START_HOUR or hour < WORK_END_HOUR
+    return WORK_START_HOUR <= hour < WORK_END_HOUR
+
+def check_timeout(user):
+    if not user.get("activity_start") or user["status"] in ["working", "off"]:
+        return None
+    
+    start = datetime.strptime(user["activity_start"], "%Y-%m-%d %H:%M:%S")
+    elapsed = (datetime.now() - start).total_seconds() / 60
+    
+    if user["status"] == "eating" and elapsed > EAT_MINUTES:
+        return f"⚠️ সতর্কতা! খাওয়ার সময়সীমা ({EAT_MINUTES} মিনিট) শেষ হয়ে গেছে। দয়া করে আসনে ফিরে আসুন।"
+    if user["status"] == "toilet" and elapsed > TOILET_MINUTES:
+        return f"⚠️ সতর্কতা! টয়লেটের সময়সীমা ({TOILET_MINUTES} মিনিট) শেষ হয়ে গেছে। দয়া করে আসনে ফিরে আসুন।"
+    if user["status"] == "smoking" and elapsed > SMOKE_MINUTES:
+        return f"⚠️ সতর্কতা! সিগারেটের সময়সীমা ({SMOKE_MINUTES} মিনিট) শেষ হয়ে গেছে। দয়া করে আসনে ফিরে আসুন।"
+    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 স্বাগতম!\n\n"
         "আমি তোমার অ্যাটেন্ডেন্স বট।\n"
-        "নিচের বাটনগুলো দিয়ে চেক-ইন করো।\n\n"
-        "⏰ কাজের সময়: বিকাল ৫টা – সকাল ৫টা",
+        "নিচের বাটনগুলো ব্যবহার করে চেক-ইন করো।",
         reply_markup=get_keyboard()
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = get_user(update.effective_user.id)
-    now = now_bd().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
+    # টাইমআউট চেক
+    warning = check_timeout(user)
+    if warning and text not in ["🔙 আসনে ফিরে আসা", "🏁 কাজ শেষ"]:
+        await update.message.reply_text(warning, reply_markup=get_keyboard())
+
     if text == "✅ কাজ শুরু":
         if not is_work_time():
-            await update.message.reply_text(
-                "❌ এখন কাজের সময় নয়।\n"
-                "কাজের সময়: বিকাল ৫টা থেকে সকাল ৫টা পর্যন্ত",
-                reply_markup=get_keyboard()
-            )
+            await update.message.reply_text("❌ এখন কাজের সময় নয়।\nকাজের সময়: বিকাল ৫টা – সকাল ৫টা", reply_markup=get_keyboard())
             return
         if user["status"] == "working":
             await update.message.reply_text("ℹ️ তুমি ইতিমধ্যে কাজ শুরু করেছো।", reply_markup=get_keyboard())
@@ -109,46 +116,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["activity_start"] = None
         user["logs"].append(f"{now} - কাজ শুরু")
         save_data()
-        await update.message.reply_text(
-            f"✅ *কাজ শুরু হয়েছে!*\n\n"
-            f"🕐 সময়: `{now}`\n"
-            f"🟢 স্ট্যাটাস: কাজ করছে",
-            reply_markup=get_keyboard(),
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ কাজ শুরু হয়েছে!\n🕐 সময়: {now}", reply_markup=get_keyboard())
 
     elif text == "🔙 আসনে ফিরে আসা":
         user["status"] = "working"
         user["activity_start"] = None
         user["logs"].append(f"{now} - আসনে ফিরে এসেছে")
         save_data()
-        await update.message.reply_text(
-            f"✅ *আসনে ফিরে এসেছো*\n\n🕐 সময়: `{now}`",
-            reply_markup=get_keyboard(),
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ আসনে ফিরে এসেছো।\n🕐 সময়: {now}", reply_markup=get_keyboard())
 
     elif text == "🍚 খাওয়া":
         if user["eat_count"] >= EAT_LIMIT:
-            await update.message.reply_text(f"❌ আজকের খাওয়ার সীমা শেষ!\nসর্বোচ্চ {EAT_LIMIT} বার", reply_markup=get_keyboard())
+            await update.message.reply_text(f"❌ আজকের খাওয়ার সীমা শেষ!\n(সর্বোচ্চ {EAT_LIMIT} বার)", reply_markup=get_keyboard())
             return
         user["status"] = "eating"
         user["activity_start"] = now
         user["eat_count"] += 1
-        user["logs"].append(f"{now} - খাওয়া ({user['eat_count']}/{EAT_LIMIT})")
+        user["logs"].append(f"{now} - খাওয়া শুরু ({user['eat_count']}/{EAT_LIMIT})")
         save_data()
         await update.message.reply_text(
-            f"🍚 *খাওয়া শুরু*\n\n"
+            f"🍚 খাওয়া শুরু হয়েছে\n"
             f"⏱️ সময়সীমা: {EAT_MINUTES} মিনিট\n"
             f"📊 আজ: {user['eat_count']}/{EAT_LIMIT} বার\n"
-            f"🕐 `{now}`",
-            reply_markup=get_keyboard(),
-            parse_mode="Markdown"
+            f"🕐 {now}",
+            reply_markup=get_keyboard()
         )
 
     elif text == "🚽 টয়লেট":
         if user["toilet_count"] >= TOILET_LIMIT:
-            await update.message.reply_text(f"❌ আজকের টয়লেট সীমা শেষ!\nসর্বোচ্চ {TOILET_LIMIT} বার", reply_markup=get_keyboard())
+            await update.message.reply_text(f"❌ আজকের টয়লেট সীমা শেষ!\n(সর্বোচ্চ {TOILET_LIMIT} বার)", reply_markup=get_keyboard())
             return
         user["status"] = "toilet"
         user["activity_start"] = now
@@ -156,17 +152,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["logs"].append(f"{now} - টয়লেট ({user['toilet_count']}/{TOILET_LIMIT})")
         save_data()
         await update.message.reply_text(
-            f"🚽 *টয়লেট*\n\n"
+            f"🚽 টয়লেট\n"
             f"⏱️ সময়সীমা: {TOILET_MINUTES} মিনিট\n"
             f"📊 আজ: {user['toilet_count']}/{TOILET_LIMIT} বার\n"
-            f"🕐 `{now}`",
-            reply_markup=get_keyboard(),
-            parse_mode="Markdown"
+            f"🕐 {now}",
+            reply_markup=get_keyboard()
         )
 
     elif text == "🚬 সিগারেট":
         if user["smoke_count"] >= SMOKE_LIMIT:
-            await update.message.reply_text(f"❌ আজকের সিগারেট সীমা শেষ!\nসর্বোচ্চ {SMOKE_LIMIT} বার", reply_markup=get_keyboard())
+            await update.message.reply_text(f"❌ আজকের সিগারেট সীমা শেষ!\n(সর্বোচ্চ {SMOKE_LIMIT} বার)", reply_markup=get_keyboard())
             return
         user["status"] = "smoking"
         user["activity_start"] = now
@@ -174,12 +169,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["logs"].append(f"{now} - সিগারেট ({user['smoke_count']}/{SMOKE_LIMIT})")
         save_data()
         await update.message.reply_text(
-            f"🚬 *সিগারেট বিরতি*\n\n"
+            f"🚬 সিগারেট বিরতি\n"
             f"⏱️ সময়সীমা: {SMOKE_MINUTES} মিনিট\n"
             f"📊 আজ: {user['smoke_count']}/{SMOKE_LIMIT} বার\n"
-            f"🕐 `{now}`",
-            reply_markup=get_keyboard(),
-            parse_mode="Markdown"
+            f"🕐 {now}",
+            reply_markup=get_keyboard()
         )
 
     elif text == "🏁 কাজ শেষ":
@@ -187,13 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["activity_start"] = None
         user["logs"].append(f"{now} - কাজ শেষ")
         save_data()
-        await update.message.reply_text(
-            f"🏁 *কাজ শেষ হয়েছে!*\n\n"
-            f"🕐 সময়: `{now}`\n"
-            f"শুভ রাত্রি!",
-            reply_markup=get_keyboard(),
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"🏁 কাজ শেষ হয়েছে!\n🕐 সময়: {now}\nশুভ রাত্রি!", reply_markup=get_keyboard())
 
     elif text == "📊 স্ট্যাটাস":
         status_map = {
@@ -204,9 +192,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "off": "🔴 অফ"
         }
         msg = (
-            f"📊 *তোমার স্ট্যাটাস*\n\n"
-            f"অবস্থা: {status_map.get(user['status'])}\n"
-            f"কাজ শুরু: `{user.get('start_time', 'এখনো শুরু হয়নি')}`\n\n"
+            f"📊 *তোমার বর্তমান স্ট্যাটাস*\n\n"
+            f"অবস্থা: {status_map.get(user['status'], user['status'])}\n"
+            f"কাজ শুরু: {user.get('start_time', 'এখনো শুরু হয়নি')}\n\n"
             f"🍚 খাওয়া: {user['eat_count']}/{EAT_LIMIT}\n"
             f"🚽 টয়লেট: {user['toilet_count']}/{TOILET_LIMIT}\n"
             f"🚬 সিগারেট: {user['smoke_count']}/{SMOKE_LIMIT}"
