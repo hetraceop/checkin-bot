@@ -1,13 +1,22 @@
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 
 TOKEN = os.getenv("TOKEN")
-
 DATA_FILE = "checkin_data.json"
 user_data = {}
+
+# ===== সেটিংস =====
+WORK_START_HOUR = 17   # বিকাল ৫টা
+WORK_END_HOUR = 5      # সকাল ৫টা
+EAT_LIMIT = 2
+EAT_MINUTES = 40
+TOILET_LIMIT = 4
+TOILET_MINUTES = 15
+SMOKE_LIMIT = 6
+SMOKE_MINUTES = 10
 
 def load_data():
     global user_data
@@ -21,98 +30,185 @@ def save_data():
 
 def get_user(user_id):
     user_id = str(user_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    
     if user_id not in user_data:
         user_data[user_id] = {
             "status": "off",
             "start_time": None,
+            "activity_start": None,
+            "date": today,
+            "eat_count": 0,
+            "toilet_count": 0,
+            "smoke_count": 0,
             "logs": []
         }
+    
+    # নতুন দিন হলে কাউন্টার রিসেট
+    if user_data[user_id].get("date") != today:
+        user_data[user_id]["date"] = today
+        user_data[user_id]["eat_count"] = 0
+        user_data[user_id]["toilet_count"] = 0
+        user_data[user_id]["smoke_count"] = 0
+        user_data[user_id]["logs"] = []
+    
     return user_data[user_id]
 
-def get_main_keyboard():
+def get_keyboard():
     keyboard = [
-        [KeyboardButton("কাজ শুরু"), KeyboardButton("আসনে ফিরে আসা")],
-        [KeyboardButton("খাওয়া"), KeyboardButton("টয়লেট")],
-        [KeyboardButton("সিগারেট"), KeyboardButton("কাজ শেষ")],
-        [KeyboardButton("স্ট্যাটাস")]
+        [KeyboardButton("✅ কাজ শুরু"), KeyboardButton("🔙 আসনে ফিরে আসা")],
+        [KeyboardButton("🍚 খাওয়া"), KeyboardButton("🚽 টয়লেট")],
+        [KeyboardButton("🚬 সিগারেট"), KeyboardButton("🏁 কাজ শেষ")],
+        [KeyboardButton("📊 স্ট্যাটাস")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def is_work_time():
+    now = datetime.now()
+    hour = now.hour
+    if WORK_START_HOUR > WORK_END_HOUR:  # রাতের শিফট
+        return hour >= WORK_START_HOUR or hour < WORK_END_HOUR
+    return WORK_START_HOUR <= hour < WORK_END_HOUR
+
+def check_timeout(user):
+    if not user.get("activity_start") or user["status"] in ["working", "off"]:
+        return None
+    
+    start = datetime.strptime(user["activity_start"], "%Y-%m-%d %H:%M:%S")
+    elapsed = (datetime.now() - start).total_seconds() / 60
+    
+    if user["status"] == "eating" and elapsed > EAT_MINUTES:
+        return f"⚠️ সতর্কতা! খাওয়ার সময়সীমা ({EAT_MINUTES} মিনিট) শেষ হয়ে গেছে। দয়া করে আসনে ফিরে আসুন।"
+    if user["status"] == "toilet" and elapsed > TOILET_MINUTES:
+        return f"⚠️ সতর্কতা! টয়লেটের সময়সীমা ({TOILET_MINUTES} মিনিট) শেষ হয়ে গেছে। দয়া করে আসনে ফিরে আসুন।"
+    if user["status"] == "smoking" and elapsed > SMOKE_MINUTES:
+        return f"⚠️ সতর্কতা! সিগারেটের সময়সীমা ({SMOKE_MINUTES} মিনিট) শেষ হয়ে গেছে। দয়া করে আসনে ফিরে আসুন।"
+    return None
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "স্বাগতম! আমি চেক-ইন বট।\nনিচের বাটনগুলো ব্যবহার করো:",
-        reply_markup=get_main_keyboard()
+        "👋 স্বাগতম!\n\n"
+        "আমি তোমার অ্যাটেন্ডেন্স বট।\n"
+        "নিচের বাটনগুলো ব্যবহার করে চেক-ইন করো।",
+        reply_markup=get_keyboard()
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = get_user(update.effective_user.id)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # টাইমআউট চেক
+    warning = check_timeout(user)
+    if warning and text not in ["🔙 আসনে ফিরে আসা", "🏁 কাজ শেষ"]:
+        await update.message.reply_text(warning, reply_markup=get_keyboard())
 
-    if text == "কাজ শুরু":
-        if user["status"] == "working":
-            await update.message.reply_text("তুমি ইতিমধ্যে কাজ শুরু করেছো!")
+    if text == "✅ কাজ শুরু":
+        if not is_work_time():
+            await update.message.reply_text("❌ এখন কাজের সময় নয়।\nকাজের সময়: বিকাল ৫টা – সকাল ৫টা", reply_markup=get_keyboard())
             return
+        if user["status"] == "working":
+            await update.message.reply_text("ℹ️ তুমি ইতিমধ্যে কাজ শুরু করেছো।", reply_markup=get_keyboard())
+            return
+        
         user["status"] = "working"
         user["start_time"] = now
+        user["activity_start"] = None
         user["logs"].append(f"{now} - কাজ শুরু")
         save_data()
-        await update.message.reply_text(f"✅ কাজ শুরু হয়েছে!\nসময়: {now}", reply_markup=get_main_keyboard())
+        await update.message.reply_text(f"✅ কাজ শুরু হয়েছে!\n🕐 সময়: {now}", reply_markup=get_keyboard())
 
-    elif text == "আসনে ফিরে আসা":
+    elif text == "🔙 আসনে ফিরে আসা":
         user["status"] = "working"
+        user["activity_start"] = None
         user["logs"].append(f"{now} - আসনে ফিরে এসেছে")
         save_data()
-        await update.message.reply_text(f"✅ আসনে ফিরে এসেছো\nসময়: {now}", reply_markup=get_main_keyboard())
+        await update.message.reply_text(f"✅ আসনে ফিরে এসেছো।\n🕐 সময়: {now}", reply_markup=get_keyboard())
 
-    elif text == "খাওয়া":
+    elif text == "🍚 খাওয়া":
+        if user["eat_count"] >= EAT_LIMIT:
+            await update.message.reply_text(f"❌ আজকের খাওয়ার সীমা শেষ!\n(সর্বোচ্চ {EAT_LIMIT} বার)", reply_markup=get_keyboard())
+            return
         user["status"] = "eating"
-        user["logs"].append(f"{now} - খাওয়া শুরু")
+        user["activity_start"] = now
+        user["eat_count"] += 1
+        user["logs"].append(f"{now} - খাওয়া শুরু ({user['eat_count']}/{EAT_LIMIT})")
         save_data()
-        await update.message.reply_text(f"🍚 খাওয়া শুরু\nসময়: {now}", reply_markup=get_main_keyboard())
-
-    elif text == "টয়লেট":
-        user["status"] = "toilet"
-        user["logs"].append(f"{now} - টয়লেট")
-        save_data()
-        await update.message.reply_text(f"🚽 টয়লেট\nসময়: {now}", reply_markup=get_main_keyboard())
-
-    elif text == "সিগারেট":
-        user["status"] = "smoking"
-        user["logs"].append(f"{now} - সিগারেট")
-        save_data()
-        await update.message.reply_text(f"🚬 সিগারেট বিরতি\nসময়: {now}", reply_markup=get_main_keyboard())
-
-    elif text == "কাজ শেষ":
-        user["status"] = "off"
-        user["logs"].append(f"{now} - কাজ শেষ")
-        save_data()
-        await update.message.reply_text(f"🏁 কাজ শেষ!\nসময়: {now}", reply_markup=get_main_keyboard())
-
-    elif text == "স্ট্যাটাস":
-        status_map = {
-            "working": "কাজ করছে",
-            "eating": "খাচ্ছে",
-            "toilet": "টয়লেটে",
-            "smoking": "সিগারেট খাচ্ছে",
-            "off": "অফ"
-        }
         await update.message.reply_text(
-            f"📊 তোমার স্ট্যাটাস: {status_map.get(user['status'], user['status'])}\n"
-            f"শুরুর সময়: {user.get('start_time', 'নেই')}",
-            reply_markup=get_main_keyboard()
+            f"🍚 খাওয়া শুরু হয়েছে\n"
+            f"⏱️ সময়সীমা: {EAT_MINUTES} মিনিট\n"
+            f"📊 আজ: {user['eat_count']}/{EAT_LIMIT} বার\n"
+            f"🕐 {now}",
+            reply_markup=get_keyboard()
         )
 
+    elif text == "🚽 টয়লেট":
+        if user["toilet_count"] >= TOILET_LIMIT:
+            await update.message.reply_text(f"❌ আজকের টয়লেট সীমা শেষ!\n(সর্বোচ্চ {TOILET_LIMIT} বার)", reply_markup=get_keyboard())
+            return
+        user["status"] = "toilet"
+        user["activity_start"] = now
+        user["toilet_count"] += 1
+        user["logs"].append(f"{now} - টয়লেট ({user['toilet_count']}/{TOILET_LIMIT})")
+        save_data()
+        await update.message.reply_text(
+            f"🚽 টয়লেট\n"
+            f"⏱️ সময়সীমা: {TOILET_MINUTES} মিনিট\n"
+            f"📊 আজ: {user['toilet_count']}/{TOILET_LIMIT} বার\n"
+            f"🕐 {now}",
+            reply_markup=get_keyboard()
+        )
+
+    elif text == "🚬 সিগারেট":
+        if user["smoke_count"] >= SMOKE_LIMIT:
+            await update.message.reply_text(f"❌ আজকের সিগারেট সীমা শেষ!\n(সর্বোচ্চ {SMOKE_LIMIT} বার)", reply_markup=get_keyboard())
+            return
+        user["status"] = "smoking"
+        user["activity_start"] = now
+        user["smoke_count"] += 1
+        user["logs"].append(f"{now} - সিগারেট ({user['smoke_count']}/{SMOKE_LIMIT})")
+        save_data()
+        await update.message.reply_text(
+            f"🚬 সিগারেট বিরতি\n"
+            f"⏱️ সময়সীমা: {SMOKE_MINUTES} মিনিট\n"
+            f"📊 আজ: {user['smoke_count']}/{SMOKE_LIMIT} বার\n"
+            f"🕐 {now}",
+            reply_markup=get_keyboard()
+        )
+
+    elif text == "🏁 কাজ শেষ":
+        user["status"] = "off"
+        user["activity_start"] = None
+        user["logs"].append(f"{now} - কাজ শেষ")
+        save_data()
+        await update.message.reply_text(f"🏁 কাজ শেষ হয়েছে!\n🕐 সময়: {now}\nশুভ রাত্রি!", reply_markup=get_keyboard())
+
+    elif text == "📊 স্ট্যাটাস":
+        status_map = {
+            "working": "🟢 কাজ করছে",
+            "eating": "🍚 খাচ্ছে",
+            "toilet": "🚽 টয়লেটে",
+            "smoking": "🚬 সিগারেট খাচ্ছে",
+            "off": "🔴 অফ"
+        }
+        msg = (
+            f"📊 *তোমার বর্তমান স্ট্যাটাস*\n\n"
+            f"অবস্থা: {status_map.get(user['status'], user['status'])}\n"
+            f"কাজ শুরু: {user.get('start_time', 'এখনো শুরু হয়নি')}\n\n"
+            f"🍚 খাওয়া: {user['eat_count']}/{EAT_LIMIT}\n"
+            f"🚽 টয়লেট: {user['toilet_count']}/{TOILET_LIMIT}\n"
+            f"🚬 সিগারেট: {user['smoke_count']}/{SMOKE_LIMIT}"
+        )
+        await update.message.reply_text(msg, reply_markup=get_keyboard(), parse_mode="Markdown")
+
     else:
-        await update.message.reply_text("দয়া করে নিচের বাটনগুলো ব্যবহার করো।", reply_markup=get_main_keyboard())
+        await update.message.reply_text("দয়া করে নিচের বাটন ব্যবহার করো।", reply_markup=get_keyboard())
 
 def main():
     load_data()
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
-
     print("বট চালু হয়েছে...")
     app.run_polling()
 
