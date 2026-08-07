@@ -1,6 +1,6 @@
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import os
 import pytz
@@ -11,8 +11,8 @@ user_data = {}
 
 BD_TZ = pytz.timezone("Asia/Dhaka")
 
-WORK_START_HOUR = 17   # বিকাল ৫টা
-WORK_END_HOUR = 5      # সকাল ৫টা
+WORK_START_HOUR = 17
+WORK_END_HOUR = 5
 EAT_LIMIT = 2
 EAT_MINUTES = 40
 TOILET_LIMIT = 4
@@ -139,17 +139,24 @@ def check_overtime(user):
     return None
 
 
+def get_late_start_minutes():
+    """বিকাল ৫টার পর কত মিনিট দেরিতে শুরু করছে"""
+    now = now_bd()
+    start_time = now.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
+    if now < start_time:
+        return 0.0
+    return round((now - start_time).total_seconds() / 60, 1)
+
+
 def get_early_leave_minutes():
     """সকাল ৫টার আগে কত মিনিট আগে শেষ করছে"""
     now = now_bd()
-    # আজকের সকাল ৫টা
     end_time = now.replace(hour=WORK_END_HOUR, minute=0, second=0, microsecond=0)
-    if now.hour >= WORK_END_HOUR:
-        # ইতিমধ্যে ৫টা পার হয়ে গেছে → early না
-        return 0.0
-    # রাতের শিফট, এখনো সকাল ৫টা হয়নি
-    diff = (end_time - now).total_seconds() / 60
-    return round(max(0, diff), 1)
+
+    # রাতের শিফট: সকাল ৫টার আগে হলে early
+    if now.hour < WORK_END_HOUR:
+        return round((end_time - now).total_seconds() / 60, 1)
+    return 0.0
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,11 +195,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Late Start Warning
+        late_minutes = get_late_start_minutes()
+        late_msg = ""
+        if late_minutes >= 1:
+            late_msg = (
+                f"⚠️ *Late Start Warning!*\n"
+                f"তুমি *{format_min(late_minutes)}* দেরিতে কাজ শুরু করেছো।\n\n"
+            )
+
         user["status"] = "working"
         user["start_time"] = now
         user["activity_start"] = None
         save_data()
-        await update.message.reply_text(f"✅ কাজ শুরু হয়েছে!\n🕐 {now}", reply_markup=get_keyboard())
+
+        await update.message.reply_text(
+            f"{late_msg}✅ কাজ শুরু হয়েছে!\n🕐 {now}",
+            reply_markup=get_keyboard(),
+            parse_mode="Markdown"
+        )
         return
 
     # ===== আসনে ফিরে আসা =====
@@ -226,18 +247,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ আগে **কাজ শুরু** করো।", reply_markup=get_keyboard(), parse_mode="Markdown")
             return
 
-        # একই বাটন আবার চাপলে
-        if (text == "🍚 খাওয়া" and user["status"] == "eating") or \
-           (text == "🚽 টয়লেট" and user["status"] == "toilet") or \
-           (text == "🚬 সিগারেট" and user["status"] == "smoking"):
-            elapsed = get_minutes(user["activity_start"])
+        # ইতিমধ্যে কোনো বিরতি চললে ব্লক করো
+        if user["status"] in ["eating", "toilet", "smoking"]:
             await update.message.reply_text(
-                f"⚠️ তুমি *ইতিমধ্যে* এই বিরতিতে আছো।\nএখন পর্যন্ত: {format_min(elapsed)}\n\nফিরে আসতে **আসনে ফিরে আসা** চাপো।",
-                reply_markup=get_keyboard(), parse_mode="Markdown"
+                "⚠️ *একসাথে দুইটা বিরতি চলবে না!*\n\n"
+                "আগে **আসনে ফিরে আসা** চাপো, তারপর নতুন বিরতি নাও।",
+                reply_markup=get_keyboard(),
+                parse_mode="Markdown"
             )
             return
-
-        prev_minutes = close_current_activity(user)
 
         if text == "🍚 খাওয়া":
             if user["eat_count"] >= EAT_LIMIT:
@@ -267,9 +285,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["activity_start"] = now
         save_data()
 
-        extra = f"\n(আগের বিরতি: {format_min(prev_minutes)})" if prev_minutes > 0 else ""
         await update.message.reply_text(
-            f"{icon} {text} শুরু\n⏱️ সময়সীমা: {limit} মিনিট\n🕐 {now}{extra}",
+            f"{icon} {text} শুরু\n⏱️ সময়সীমা: {limit} মিনিট\n🕐 {now}",
             reply_markup=get_keyboard()
         )
         return
@@ -286,10 +303,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_break = user["eat_minutes"] + user["toilet_minutes"] + user["smoke_minutes"]
         pure_work = max(0.0, total_work - total_break)
 
-        # Early Leave Check
+        # Early Leave Warning
         early_minutes = get_early_leave_minutes()
         early_warning = ""
-        if early_minutes > 0:
+        if early_minutes >= 1:
             early_warning = (
                 f"⚠️ *Warning: You have left early!*\n"
                 f"Duration of Leaving Early: *{format_min(early_minutes)}*\n"
